@@ -1,0 +1,68 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'adityakumar16290@gmail.com' && 
+        request.auth.token.email_verified == true
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Collections ---
+
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.keys().hasAll(['uid', 'email']) &&
+               data.uid is string && data.uid == request.auth.uid &&
+               data.email is string && data.email.size() <= 200;
+      }
+
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(userId) && isValidUser(incoming()) && incoming().role == 'user';
+      allow update: if isOwner(userId) && isValidUser(incoming()) && 
+                    incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL']);
+    }
+
+    match /blogPosts/{postId} {
+      function isValidBlogPost(data) {
+        return data.keys().hasAll(['title', 'excerpt', 'tag', 'date', 'authorId']) &&
+               data.title is string && data.title.size() <= 200 &&
+               data.excerpt is string && data.excerpt.size() <= 2000 &&
+               data.tag is string && data.tag.size() <= 50 &&
+               data.authorId == request.auth.uid;
+      }
+
+      allow read: if true;
+      allow create: if isAdmin() && isValidBlogPost(incoming());
+      allow update: if isAdmin() && isValidBlogPost(incoming());
+      allow delete: if isAdmin();
+    }
+  }
+}

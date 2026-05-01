@@ -2,21 +2,85 @@ import { motion } from "motion/react";
 import { Bot, Globe, Zap, ArrowRight, MessageSquare, Layout, Activity } from "lucide-react";
 import { useState, FormEvent, useEffect } from "react";
 import { api } from "./services/gemini";
+import { auth } from "./lib/firebase";
+import { 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  onAuthStateChanged, 
+  signOut,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendEmailVerification
+} from "firebase/auth";
 
 // --- Components ---
 
-const AuthModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: () => void, onLogin: (user: any) => void }) => {
+const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }) => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isSignUp, setIsSignUp] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const [success, setSuccess] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: FormEvent) => {
+  const validatePassword = (pass: string) => {
+    const hasAlpha = /[a-zA-Z]/.test(pass);
+    const hasSymbol = /[!@#$%^&*(),.?":{}|<>]/.test(pass);
+    const isLongEnough = pass.length >= 8;
+    return hasAlpha && hasSymbol && isLongEnough;
+  };
+
+  const handleGoogleSignIn = async () => {
+    setIsLoading(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+      onClose();
+    } catch (err: any) {
+      if (err.code === 'auth/popup-blocked') {
+        setError("Sign-in popup was blocked. Please open the app in a new tab or enable popups.");
+      } else {
+        setError(err.message);
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    // Simulate auth
-    onLogin({ email, name: email.split('@')[0] });
-    onClose();
+    setIsLoading(true);
+    setError(null);
+    setSuccess(null);
+
+    if (isSignUp && !validatePassword(password)) {
+      setError("Password must be at least 8 characters long and include both alphabets and symbols.");
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      if (isSignUp) {
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        await sendEmailVerification(userCredential.user);
+        setSuccess("Verification email sent! Please check your inbox.");
+        // Clear inputs
+        setEmail("");
+        setPassword("");
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+        onClose();
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -36,6 +100,32 @@ const AuthModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: () 
           </div>
           <h2 className="text-3xl font-bold tracking-tight">{isSignUp ? 'Join EngageFlow' : 'Welcome Back'}</h2>
           <p className="text-gray-500 text-sm mt-2">Start automating your growth today.</p>
+        </div>
+
+        {error && (
+          <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl text-red-600 text-[10px] font-bold uppercase tracking-tight">
+            {error}
+          </div>
+        )}
+
+        {success && (
+          <div className="mb-6 p-4 bg-emerald-50 border border-emerald-100 rounded-2xl text-emerald-600 text-[10px] font-bold uppercase tracking-tight">
+            {success}
+          </div>
+        )}
+
+        <button 
+          onClick={handleGoogleSignIn}
+          disabled={isLoading}
+          className="w-full flex items-center justify-center gap-3 bg-white border border-gray-200 py-4 rounded-2xl font-bold hover:bg-gray-50 transition-all mb-6 text-sm"
+        >
+          <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5" />
+          Continue with Google
+        </button>
+
+        <div className="relative mb-6">
+          <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-100"></div></div>
+          <div className="relative flex justify-center text-[10px] uppercase font-bold tracking-widest"><span className="bg-white px-4 text-gray-400">Or use email</span></div>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -61,8 +151,11 @@ const AuthModal = ({ isOpen, onClose, onLogin }: { isOpen: boolean, onClose: () 
               placeholder="••••••••"
             />
           </div>
-          <button className="w-full bg-black text-white py-5 rounded-2xl font-bold hover:bg-gray-800 transition-all shadow-xl shadow-gray-200">
-            {isSignUp ? 'Create Professional Account' : 'Sign In Now'}
+          <button 
+            disabled={isLoading}
+            className="w-full bg-black text-white py-5 rounded-2xl font-bold hover:bg-gray-800 transition-all shadow-xl shadow-gray-200 disabled:opacity-50"
+          >
+            {isLoading ? <Activity className="animate-spin mx-auto" /> : (isSignUp ? 'Create Professional Account' : 'Sign In Now')}
           </button>
         </form>
 
@@ -977,37 +1070,234 @@ const Footer = () => (
   </footer>
 );
 
+const AdminDashboard = () => {
+  const [isAIAdminEnabled, setIsAIAdminEnabled] = useState(false);
+  const [isFirewallActive, setIsFirewallActive] = useState(true);
+  const [isAutoScalingActive, setIsAutoScalingActive] = useState(false);
+  const [lastAction, setLastAction] = useState<string | null>(null);
+
+  const stats = [
+    { label: "Active Nodes", value: "14", icon: Activity, iconColor: "text-emerald-500" },
+    { label: "AI Generations", value: "2,482", icon: Zap, iconColor: "text-amber-500" },
+    { label: "Partner Growth", value: "+12.5%", icon: Globe, iconColor: "text-indigo-500" },
+    { label: "System Uptime", value: "99.98%", icon: Layout, iconColor: "text-blue-500" },
+  ];
+
+  const logs = [
+    { event: "New Chatbot Deployment", user: "Enterprise_04", time: "2 min ago" },
+    { event: "Website Generation", user: "Startup_Unit", time: "14 min ago" },
+    { event: "API Key Rotated", user: "System_Kernel", time: "1 hour ago" },
+    ...(isAIAdminEnabled ? [{ event: "AI Node Optimization", user: "Auto_Admin", time: "Just now" }] : []),
+    { event: "New User Registered", user: "dev_test", time: "3 hours ago" },
+  ];
+
+  const showFeedback = (msg: string) => {
+    setLastAction(msg);
+    setTimeout(() => setLastAction(null), 3000);
+  };
+
+  return (
+    <section id="admin-panel" className="py-24 px-6 bg-[#0a0a0a] text-white overflow-hidden">
+      <div className="max-w-7xl mx-auto">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-12 gap-6">
+          <div>
+            <div className="flex items-center gap-3 mb-2">
+              <span className="px-2 py-0.5 bg-indigo-500/20 text-indigo-400 text-[10px] font-bold uppercase tracking-widest rounded border border-indigo-500/30">
+                Root Access
+              </span>
+              <h2 className="text-4xl font-bold tracking-tight">Admin Control Center</h2>
+            </div>
+            <p className="text-white/40">Global oversight and infrastructure monitoring.</p>
+          </div>
+          <div className="flex items-center gap-4">
+            {lastAction && (
+              <motion.span 
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="text-xs font-mono text-indigo-400"
+              >
+                {lastAction}
+              </motion.span>
+            )}
+            <div className="flex gap-3">
+              <button 
+                onClick={() => showFeedback("NODES_REFRESHED")}
+                className="px-5 py-2 bg-white/5 border border-white/10 rounded-xl text-xs font-bold hover:bg-white/10 transition-colors uppercase tracking-widest"
+              >
+                Refresh Nodes
+              </button>
+              <button 
+                onClick={() => showFeedback("LOGS_EXPORTED_CSV")}
+                className="px-5 py-2 bg-indigo-600 rounded-xl text-xs font-bold hover:bg-indigo-500 transition-colors uppercase tracking-widest"
+              >
+                Export Logs
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid md:grid-cols-4 gap-6 mb-12">
+          {stats.map((stat) => (
+            <div key={stat.label} className="bg-white/5 border border-white/10 p-6 rounded-[2rem] hover:bg-white/[0.07] transition-all group">
+              <div className="flex justify-between items-start mb-4">
+                <div className={`p-3 bg-black rounded-xl border border-white/10 ${stat.iconColor}`}>
+                  <stat.icon size={20} />
+                </div>
+                <span className="text-[10px] font-bold text-white/20 uppercase tracking-widest">Live</span>
+              </div>
+              <p className="text-white/40 text-sm mb-1">{stat.label}</p>
+              <p className="text-3xl font-bold">{stat.value}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid lg:grid-cols-3 gap-8">
+          <div className="lg:col-span-2 bg-white/5 border border-white/10 rounded-[2.5rem] overflow-hidden">
+            <div className="px-8 py-6 border-b border-white/10 flex justify-between items-center">
+              <h3 className="font-bold flex items-center gap-2 text-sm uppercase tracking-widest">
+                <Activity size={16} className="text-indigo-400" />
+                Infrastructure Logs
+              </h3>
+              <div className="flex gap-2">
+                <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="text-[10px] text-emerald-500/80 font-bold uppercase">Real-time Stream</span>
+              </div>
+            </div>
+            <div className="p-8">
+              <table className="w-full">
+                <thead>
+                  <tr className="text-left text-[10px] font-bold text-white/20 uppercase tracking-widest">
+                    <th className="pb-4">Event Description</th>
+                    <th className="pb-4">Actor</th>
+                    <th className="pb-4 text-right">Timestamp</th>
+                  </tr>
+                </thead>
+                <tbody className="text-sm font-medium">
+                  {logs.map((log, i) => (
+                    <tr key={i} className="border-t border-white/5 group">
+                      <td className="py-4 text-white/80 group-hover:text-white transition-colors">{log.event}</td>
+                      <td className="py-4 text-indigo-400 font-mono text-xs">{log.user}</td>
+                      <td className="py-4 text-white/40 text-right text-xs">{log.time}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="space-y-8">
+            <div className={`rounded-[2.5rem] p-8 text-white relative overflow-hidden group transition-all duration-500 ${isAIAdminEnabled ? 'bg-indigo-600' : 'bg-gray-800'}`}>
+              <div className="relative z-10">
+                <h3 className="text-xl font-bold mb-2">{isAIAdminEnabled ? 'AI Admin Active' : 'Automate Admin Duties'}</h3>
+                <p className="text-white/80 text-sm mb-6 leading-relaxed">
+                  {isAIAdminEnabled 
+                    ? 'AI is currently monitoring infrastructure and optimizing resource allocation in real-time.' 
+                    : 'Let our proprietary agent handle routine node maintenance and log rotation while you sleep.'}
+                </p>
+                <button 
+                  onClick={() => {
+                    setIsAIAdminEnabled(!isAIAdminEnabled);
+                    showFeedback(isAIAdminEnabled ? "AI_ADMIN_OFF" : "AI_ADMIN_INITIALIZED");
+                  }}
+                  className={`w-full py-4 rounded-2xl font-bold transition-all flex items-center justify-center gap-2 shadow-xl ${isAIAdminEnabled ? 'bg-white text-black hover:bg-gray-100 shadow-indigo-900/40' : 'bg-black text-white hover:bg-gray-900 shadow-emerald-900/10'}`}
+                >
+                  {isAIAdminEnabled ? 'Deactivate AI Admin' : 'Enable AI Admin'} {isAIAdminEnabled ? <Activity className="animate-spin" size={18} /> : <Zap size={18} />}
+                </button>
+              </div>
+              <Activity size={120} className={`absolute -bottom-10 -right-10 text-white/10 rotate-12 transition-transform duration-700 ${isAIAdminEnabled ? 'animate-pulse' : 'group-hover:rotate-0'}`} />
+            </div>
+
+            <div className="bg-white/5 border border-white/10 rounded-[2.5rem] p-8">
+              <h3 className="font-bold text-sm uppercase tracking-widest mb-6">Security Perimeter</h3>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between p-4 bg-black/40 rounded-2xl border border-white/5">
+                  <span className="text-sm text-white/60">Firewall Shield</span>
+                  <button 
+                    onClick={() => {
+                      setIsFirewallActive(!isFirewallActive);
+                      showFeedback(isFirewallActive ? "FIREWALL_DISABLED" : "FIREWALL_ENABLED");
+                    }}
+                    className={`w-10 h-5 border rounded-full relative transition-all duration-300 ${isFirewallActive ? 'bg-emerald-500/20 border-emerald-500/50' : 'bg-gray-800 border-white/10'}`}
+                  >
+                    <div className={`absolute top-0.5 w-3.5 h-3.5 rounded-full transition-all duration-300 ${isFirewallActive ? 'right-0.5 bg-emerald-500' : 'left-0.5 bg-white/20'}`} />
+                  </button>
+                </div>
+                <div className="flex items-center justify-between p-4 bg-black/40 rounded-2xl border border-white/5">
+                  <span className="text-sm text-white/60">Auto-Scaling</span>
+                  <button 
+                    onClick={() => {
+                      setIsAutoScalingActive(!isAutoScalingActive);
+                      showFeedback(isAutoScalingActive ? "AUTOSCALE_DISABLED" : "AUTOSCALE_ENABLED");
+                    }}
+                    className={`w-10 h-5 border rounded-full relative transition-all duration-300 ${isAutoScalingActive ? 'bg-blue-500/20 border-blue-500/50' : 'bg-gray-800 border-white/10'}`}
+                  >
+                    <div className={`absolute top-0.5 w-3.5 h-3.5 rounded-full transition-all duration-300 ${isAutoScalingActive ? 'right-0.5 bg-blue-500' : 'left-0.5 bg-white/20'}`} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+};
+
 export default function App() {
   const [user, setUser] = useState<any>(null);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [isReady, setIsReady] = useState(false);
 
-  // Persistence simulation
   useEffect(() => {
-    const saved = localStorage.getItem('ef_user');
-    if (saved) setUser(JSON.parse(saved));
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      if (firebaseUser) {
+        setUser({
+          uid: firebaseUser.uid,
+          email: firebaseUser.email,
+          name: firebaseUser.displayName || firebaseUser.email?.split('@')[0],
+          photo: firebaseUser.photoURL,
+        });
+      } else {
+        setUser(null);
+      }
+      setIsReady(true);
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  const handleLogin = (u: any) => {
-    setUser(u);
-    localStorage.setItem('ef_user', JSON.stringify(u));
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (err) {
+      console.error("Logout error:", err);
+    }
   };
 
-  const handleLogout = () => {
-    setUser(null);
-    localStorage.removeItem('ef_user');
-  };
+  const isAdmin = user?.email === 'adityakumar16290@gmail.com';
+
+  if (!isReady) {
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center">
+        <Activity className="animate-spin text-black" size={40} />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-white text-black font-sans selection:bg-black selection:text-white">
       <Navbar onOpenAuth={() => setIsAuthOpen(true)} user={user} onLogout={handleLogout} />
-      <AuthModal isOpen={isAuthOpen} onClose={() => setIsAuthOpen(false)} onLogin={handleLogin} />
+      <AuthModal isOpen={isAuthOpen} onClose={() => setIsAuthOpen(false)} />
       
       <main>
         <Hero onOpenAuth={() => setIsAuthOpen(true)} />
         <Features />
         
         {user ? (
-          <AIDemo />
+          <>
+            {isAdmin && <AdminDashboard />}
+            <AIDemo />
+          </>
         ) : (
           <section id="demo" className="py-24 px-6 bg-gray-50 border-y border-gray-100">
             <div className="max-w-4xl mx-auto text-center">
