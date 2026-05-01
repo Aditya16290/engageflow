@@ -39,11 +39,14 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
     setSuccess(null);
     try {
       const provider = new GoogleAuthProvider();
+      // Using signInWithPopup but catching common mobile blocks
       await signInWithPopup(auth, provider);
       onClose();
     } catch (err: any) {
       if (err.code === 'auth/popup-blocked') {
-        setError("Sign-in popup was blocked. Please open the app in a new tab or enable popups.");
+        setError("Popup blocked. Please open this app in a new tab or browser (like Chrome/Safari) to use Google Sign-In.");
+      } else if (err.code === 'auth/cancelled-popup-request') {
+        // User closed the popup, don't show as a scary error
       } else {
         setError(err.message);
       }
@@ -68,8 +71,7 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
       if (isSignUp) {
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         await sendEmailVerification(userCredential.user);
-        setSuccess("Verification email sent! Please check your inbox.");
-        // Clear inputs
+        setSuccess("Verification email sent! Check your inbox.");
         setEmail("");
         setPassword("");
       } else {
@@ -84,18 +86,21 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[100] flex items-start sm:items-center justify-center p-4 sm:p-6 bg-black/60 backdrop-blur-md overflow-y-auto pt-10 sm:pt-0">
       <motion.div 
-        initial={{ opacity: 0, scale: 0.9, y: 20 }}
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        className="bg-white w-full max-w-md rounded-[2.5rem] p-10 shadow-2xl relative overflow-hidden"
+        className="bg-white w-full max-w-md rounded-[2.5rem] p-6 sm:p-10 shadow-[0_32px_64px_-16px_rgba(0,0,0,0.3)] relative my-auto"
       >
-        <button onClick={onClose} className="absolute top-8 right-8 text-gray-400 hover:text-black">
-          <Zap size={24} className="rotate-45" />
+        <button 
+          onClick={onClose} 
+          className="absolute top-6 right-6 sm:top-8 sm:right-8 p-2 text-gray-400 hover:text-black hover:bg-gray-50 rounded-full transition-all"
+        >
+          <Zap size={20} className="rotate-45" />
         </button>
         
         <div className="text-center mb-8">
-          <div className="w-12 h-12 bg-black text-white rounded-2xl flex items-center justify-center mx-auto mb-4">
+          <div className="w-12 h-12 bg-black text-white rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-black/20">
             <Zap size={24} />
           </div>
           <h2 className="text-3xl font-bold tracking-tight">{isSignUp ? 'Join EngageFlow' : 'Welcome Back'}</h2>
@@ -103,21 +108,29 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
         </div>
 
         {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl text-red-600 text-[10px] font-bold uppercase tracking-tight">
+          <motion.div 
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            className="mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl text-red-600 text-[10px] font-bold uppercase tracking-tight"
+          >
             {error}
-          </div>
+          </motion.div>
         )}
 
         {success && (
-          <div className="mb-6 p-4 bg-emerald-50 border border-emerald-100 rounded-2xl text-emerald-600 text-[10px] font-bold uppercase tracking-tight">
+          <motion.div 
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            className="mb-6 p-4 bg-emerald-50 border border-emerald-100 rounded-2xl text-emerald-600 text-[10px] font-bold uppercase tracking-tight"
+          >
             {success}
-          </div>
+          </motion.div>
         )}
 
         <button 
           onClick={handleGoogleSignIn}
           disabled={isLoading}
-          className="w-full flex items-center justify-center gap-3 bg-white border border-gray-200 py-4 rounded-2xl font-bold hover:bg-gray-50 transition-all mb-6 text-sm"
+          className="w-full flex items-center justify-center gap-3 bg-white border border-gray-200 py-4 rounded-2xl font-bold hover:bg-gray-50 transition-all mb-6 text-sm active:scale-[0.98]"
         >
           <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5" />
           Continue with Google
@@ -136,7 +149,7 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
               type="email" 
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors"
+              className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors text-base"
               placeholder="name@company.com"
             />
           </div>
@@ -147,23 +160,24 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
               type="password" 
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors"
+              className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors text-base"
               placeholder="••••••••"
             />
           </div>
           <button 
             disabled={isLoading}
-            className="w-full bg-black text-white py-5 rounded-2xl font-bold hover:bg-gray-800 transition-all shadow-xl shadow-gray-200 disabled:opacity-50"
+            className="w-full bg-black text-white py-5 rounded-2xl font-bold hover:bg-gray-800 transition-all shadow-xl shadow-black/10 disabled:opacity-50 active:scale-[0.98]"
           >
-            {isLoading ? <Activity className="animate-spin mx-auto" /> : (isSignUp ? 'Create Professional Account' : 'Sign In Now')}
+            {isLoading ? <Activity className="animate-spin mx-auto text-white" /> : (isSignUp ? 'Create Professional Account' : 'Sign In Now')}
           </button>
         </form>
 
         <p className="text-center text-xs text-gray-400 mt-8 leading-relaxed">
           {isSignUp ? 'Already a member?' : "Don't have an account?"}{' '}
           <button 
+            type="button"
             onClick={() => setIsSignUp(!isSignUp)}
-            className="text-black font-bold border-b border-black pb-0.5"
+            className="text-black font-bold border-b border-black pb-0.5 hover:opacity-70 transition-opacity"
           >
             {isSignUp ? 'Sign In' : 'Join the waitlist'}
           </button>
@@ -1163,21 +1177,21 @@ const AdminDashboard = () => {
                 <span className="text-[10px] text-emerald-500/80 font-bold uppercase">Real-time Stream</span>
               </div>
             </div>
-            <div className="p-8">
-              <table className="w-full">
+            <div className="p-0 sm:p-8 overflow-x-auto">
+              <table className="w-full min-w-[600px]">
                 <thead>
                   <tr className="text-left text-[10px] font-bold text-white/20 uppercase tracking-widest">
-                    <th className="pb-4">Event Description</th>
-                    <th className="pb-4">Actor</th>
-                    <th className="pb-4 text-right">Timestamp</th>
+                    <th className="pb-4 px-6 md:px-0">Event Description</th>
+                    <th className="pb-4 px-6 md:px-0">Actor</th>
+                    <th className="pb-4 px-6 md:px-0 text-right">Timestamp</th>
                   </tr>
                 </thead>
                 <tbody className="text-sm font-medium">
                   {logs.map((log, i) => (
                     <tr key={i} className="border-t border-white/5 group">
-                      <td className="py-4 text-white/80 group-hover:text-white transition-colors">{log.event}</td>
-                      <td className="py-4 text-indigo-400 font-mono text-xs">{log.user}</td>
-                      <td className="py-4 text-white/40 text-right text-xs">{log.time}</td>
+                      <td className="py-4 px-6 md:px-0 text-white/80 group-hover:text-white transition-colors">{log.event}</td>
+                      <td className="py-4 px-6 md:px-0 text-indigo-400 font-mono text-xs">{log.user}</td>
+                      <td className="py-4 px-6 md:px-0 text-white/40 text-right text-xs whitespace-nowrap">{log.time}</td>
                     </tr>
                   ))}
                 </tbody>
