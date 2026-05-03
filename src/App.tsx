@@ -45,6 +45,10 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
     } catch (err: any) {
       if (err.code === 'auth/popup-blocked') {
         setError("Popup blocked. Please open this app in a new tab or browser (like Chrome/Safari) to use Google Sign-In.");
+      } else if (err.code === 'auth/unauthorized-domain') {
+        setError("Domain not authorized. Please add this domain to 'Authorized domains' in your Firebase Console (Authentication > Settings).");
+      } else if (err.code === 'auth/operation-not-allowed') {
+        setError("Email/Password auth is not enabled. Please enable 'Email/Password' in your Firebase Console (Authentication > Sign-in method).");
       } else if (err.code === 'auth/cancelled-popup-request') {
         // User closed the popup, don't show as a scary error
       } else {
