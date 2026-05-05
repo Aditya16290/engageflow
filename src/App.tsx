@@ -31,7 +31,6 @@ import {
   deleteDoc
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from "./lib/firebase";
-import { generateBlogContent } from "./lib/gemini";
 import ReactMarkdown from 'react-markdown';
 
 // --- Components ---
@@ -524,6 +523,16 @@ const Navbar = ({ onOpenAuth, onOpenSettings, user, onLogout }: { onOpenAuth: ()
           {user ? (
             <div className="flex flex-col gap-4">
               <p className="font-bold text-gray-400 uppercase text-xs tracking-widest">Signed in as {user.name}</p>
+              {user.role === 'admin' && (
+                <a 
+                  href="#admin-panel" 
+                  onClick={() => setIsMenuOpen(false)}
+                  className="bg-indigo-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20"
+                >
+                  <Zap size={18} /> Launch Control
+                </a>
+              )}
+              <button onClick={() => { onOpenSettings(); setIsMenuOpen(false); }} className="bg-gray-100 text-gray-600 py-4 rounded-xl font-bold">Settings</button>
               <button onClick={() => { onLogout(); setIsMenuOpen(false); }} className="bg-red-50 text-red-500 py-4 rounded-xl font-bold">Logout</button>
             </div>
           ) : (
@@ -1475,11 +1484,13 @@ const AdminPanel = () => {
   const [activeTab, setActiveTab] = useState<'users' | 'posts' | 'messages'>('users');
   const [posts, setPosts] = useState<any[]>([]);
   const [messages, setMessages] = useState<any[]>([]);
+  const [userList, setUserList] = useState<any[]>([]);
   
   const [newPost, setNewPost] = useState({ title: '', excerpt: '', content: '', tag: 'Growth' });
   const [isPublishing, setIsPublishing] = useState(false);
   const [isAIGenerating, setIsAIGenerating] = useState(false);
   const [aiTopic, setAiTopic] = useState('');
+  const [aiFeedback, setAiFeedback] = useState<string | null>(null);
 
   useEffect(() => {
     const qPosts = query(collection(db, 'blogPosts'), orderBy('createdAt', 'desc'));
@@ -1492,7 +1503,12 @@ const AdminPanel = () => {
       setMessages(sn.docs.map(d => ({ id: d.id, ...d.data() })));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'contacts'));
 
-    return () => { unsubPosts(); unsubMsgs(); };
+    const qUsers = query(collection(db, 'users'), orderBy('createdAt', 'desc'));
+    const unsubUsers = onSnapshot(qUsers, (sn) => {
+      setUserList(sn.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'users'));
+
+    return () => { unsubPosts(); unsubMsgs(); unsubUsers(); };
   }, []);
 
   const handleCreatePost = async () => {
@@ -1517,15 +1533,18 @@ const AdminPanel = () => {
     if (!aiTopic) return;
     setIsAIGenerating(true);
     try {
-      const generated = await generateBlogContent(aiTopic);
+      const generated = await api.generateBlogContent(aiTopic);
       setNewPost({
         title: generated.title,
         excerpt: generated.excerpt,
         content: generated.content,
         tag: generated.tag
       });
+      setAiFeedback("Content generated! Review it below and click Publish.");
+      setTimeout(() => setAiFeedback(null), 5000);
     } catch (error) {
       console.error("AI Generation failed:", error);
+      setAiFeedback("Generation failed. Please try a different topic.");
     } finally {
       setIsAIGenerating(false);
     }
@@ -1585,6 +1604,11 @@ const AdminPanel = () => {
                     {isAIGenerating ? <Activity className="animate-spin" size={16} /> : 'Generate'}
                   </button>
                 </div>
+                {aiFeedback && (
+                  <p className={`mt-3 text-[10px] font-bold uppercase tracking-widest ${aiFeedback.includes('failed') ? 'text-red-400' : 'text-emerald-400'}`}>
+                    {aiFeedback}
+                  </p>
+                )}
               </div>
 
               <div className="bg-white/5 p-8 rounded-[2.5rem] border border-white/10">
@@ -1686,8 +1710,9 @@ const AdminPanel = () => {
 
         {activeTab === 'users' && (
           <div className="bg-white/5 rounded-[3rem] border border-white/10 overflow-hidden">
-            <div className="bg-white/5 px-10 py-6 border-b border-white/10">
+            <div className="bg-white/5 px-10 py-6 border-b border-white/10 flex justify-between items-center">
               <span className="text-[10px] text-emerald-500/80 font-bold uppercase tracking-widest">Active Users System</span>
+              <span className="text-[10px] text-white/40 font-bold uppercase tracking-widest">{userList.length} Accounts</span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left">
@@ -1699,14 +1724,22 @@ const AdminPanel = () => {
                   </tr>
                 </thead>
                 <tbody className="text-sm font-medium">
-                  <tr className="border-t border-white/5 group">
-                    <td className="p-8">
-                      <p className="text-white">System Admin</p>
-                      <p className="text-indigo-400 text-xs">adityakumar16290@gmail.com</p>
-                    </td>
-                    <td className="p-8"><span className="px-2 py-1 bg-indigo-500/20 text-indigo-400 rounded text-[10px] font-bold uppercase">Root</span></td>
-                    <td className="p-8 text-white/40 text-right text-xs">May 1, 2026</td>
-                  </tr>
+                  {userList.map(u => (
+                    <tr key={u.uid} className="border-t border-white/5 group hover:bg-white/[0.02] transition-colors">
+                      <td className="p-8">
+                        <p className="text-white font-bold">{u.displayName || 'Anonymous'}</p>
+                        <p className="text-indigo-400 text-xs">{u.email}</p>
+                      </td>
+                      <td className="p-8">
+                        <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase ${u.role === 'admin' ? 'bg-indigo-500/20 text-indigo-400' : 'bg-white/5 text-white/40'}`}>
+                          {u.role || 'User'}
+                        </span>
+                      </td>
+                      <td className="p-8 text-white/40 text-right text-xs">
+                        {u.createdAt?.toDate ? u.createdAt.toDate().toLocaleDateString() : 'N/A'}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -1737,6 +1770,11 @@ export default function App() {
         let role = 'user';
         let bio = '';
         
+        // Force admin role immediately for the root user to avoid race conditions or Firestore lag
+        if (firebaseUser.email === 'adityakumar16290@gmail.com') {
+          role = 'admin';
+        }
+
         try {
           // Fetch additional user data from Firestore
           const userRef = doc(db, 'users', firebaseUser.uid);
@@ -1744,12 +1782,14 @@ export default function App() {
           
           if (userSnap.exists()) {
             const data = userSnap.data();
-            role = data.role || 'user';
+            // Only override if not already forced to admin
+            if (role !== 'admin') {
+              role = data.role || 'user';
+            }
             bio = data.bio || '';
             
-            // Force role to admin if email matches, even if Firestore is outdated
-            if (firebaseUser.email === 'adityakumar16290@gmail.com' && role !== 'admin') {
-              role = 'admin';
+            // Sync with Firestore if role was forced but not yet saved
+            if (firebaseUser.email === 'adityakumar16290@gmail.com' && data.role !== 'admin') {
               await setDoc(userRef, { ...data, role: 'admin' }, { merge: true });
             }
           } else {
@@ -1757,15 +1797,15 @@ export default function App() {
             const isTargetAdmin = firebaseUser.email === 'adityakumar16290@gmail.com';
             await setDoc(userRef, {
               uid: firebaseUser.uid,
-              email: firebaseUser.email,
-              displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0],
+              email: firebaseUser.email || '',
+              displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
               photoURL: firebaseUser.photoURL || '',
               role: isTargetAdmin ? 'admin' : 'user',
               bio: '',
               theme: 'light',
               createdAt: serverTimestamp(),
             });
-            role = isTargetAdmin ? 'admin' : 'user';
+            if (isTargetAdmin) role = 'admin';
           }
         } catch (err: any) {
           // If it's a permission error during initial load, we still want to let the user in
