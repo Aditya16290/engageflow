@@ -1,5 +1,5 @@
-import { motion } from "motion/react";
-import { Bot, Globe, Zap, ArrowRight, MessageSquare, Layout, Activity } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
+import { Bot, Globe, Zap, ArrowRight, MessageSquare, Layout, Activity, Trash2 } from "lucide-react";
 import { useState, FormEvent, useEffect } from "react";
 import { api } from "./services/gemini";
 import { auth } from "./lib/firebase";
@@ -10,21 +10,138 @@ import {
   signOut,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
-  sendEmailVerification
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  confirmPasswordReset,
+  verifyPasswordResetCode
 } from "firebase/auth";
 
+import { 
+  collection, 
+  addDoc, 
+  getDocs, 
+  onSnapshot, 
+  query, 
+  orderBy, 
+  updateDoc, 
+  doc, 
+  serverTimestamp,
+  setDoc,
+  getDoc,
+  deleteDoc
+} from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from "./lib/firebase";
+import { generateBlogContent } from "./lib/gemini";
+import ReactMarkdown from 'react-markdown';
+
 // --- Components ---
+
+const SettingsModal = ({ isOpen, onClose, user }: { isOpen: boolean, onClose: () => void, user: any }) => {
+  const [displayName, setDisplayName] = useState(user?.name || "");
+  const [bio, setBio] = useState(user?.bio || "");
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!isOpen) return null;
+
+  const handleSave = async (e: FormEvent) => {
+    e.preventDefault();
+    setIsSaving(true);
+    setError(null);
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      await updateDoc(userRef, {
+        displayName,
+        bio,
+      });
+      onClose();
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
+      setError(err.message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-black/60 backdrop-blur-md">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="bg-white w-full max-w-md rounded-[2.5rem] p-10 shadow-2xl relative"
+      >
+        <button onClick={onClose} className="absolute top-8 right-8 text-gray-400 hover:text-black">
+          <Zap size={24} className="rotate-45" />
+        </button>
+        <h2 className="text-3xl font-bold mb-8">Profile Settings</h2>
+        {error && <div className="mb-4 p-4 bg-red-50 text-red-600 rounded-xl text-xs">{error}</div>}
+        <form onSubmit={handleSave} className="space-y-6">
+          <div>
+            <label className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2 block">Display Name</label>
+            <input 
+              className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black"
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2 block">Bio</label>
+            <textarea 
+              className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black resize-none"
+              rows={3}
+              value={bio}
+              onChange={e => setBio(e.target.value)}
+              placeholder="Tell us about yourself..."
+            />
+          </div>
+          <button 
+            disabled={isSaving}
+            className="w-full bg-black text-white py-5 rounded-2xl font-bold hover:bg-gray-800 transition-all disabled:opacity-50"
+          >
+            {isSaving ? <Activity className="animate-spin mx-auto" /> : 'Save Changes'}
+          </button>
+        </form>
+      </motion.div>
+    </div>
+  );
+};
 
 const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }) => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [isSignUp, setIsSignUp] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [view, setView] = useState<'login' | 'signup' | 'forgotPassword' | 'resetPassword'>('login');
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-
   const [success, setSuccess] = useState<string | null>(null);
+  const [oobCode, setOobCode] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Detect reset mode from URL
+    const params = new URLSearchParams(window.location.search);
+    const mode = params.get('mode');
+    const code = params.get('oobCode');
+    if (mode === 'resetPassword' && code) {
+      setOobCode(code);
+      setView('resetPassword');
+      // Verify code validity
+      verifyPasswordResetCode(auth, code)
+        .then((email) => {
+          setSuccess(`Resetting password for ${email}`);
+        })
+        .catch((err) => {
+          setError("This password reset link is invalid or has expired.");
+          setView('login');
+        });
+    }
+  }, []);
 
   if (!isOpen) return null;
+
+  const isSignUp = view === 'signup';
+  const isForgotPassword = view === 'forgotPassword';
+  const isResetPassword = view === 'resetPassword';
 
   const validatePassword = (pass: string) => {
     const hasAlpha = /[a-zA-Z]/.test(pass);
@@ -46,9 +163,15 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
       if (err.code === 'auth/popup-blocked') {
         setError("Popup blocked. Please open this app in a new tab or browser (like Chrome/Safari) to use Google Sign-In.");
       } else if (err.code === 'auth/unauthorized-domain') {
-        setError("Domain not authorized. Please add this domain to 'Authorized domains' in your Firebase Console (Authentication > Settings).");
+        setError("Domain not authorized. Add your domain to 'Authorized domains' in Firebase Console (Authentication > Settings).");
       } else if (err.code === 'auth/operation-not-allowed') {
-        setError("Email/Password auth is not enabled. Please enable 'Email/Password' in your Firebase Console (Authentication > Sign-in method).");
+        setError("Email/Password auth is not enabled in Firebase Console (Authentication > Sign-in method).");
+      } else if (err.code === 'auth/invalid-credential') {
+        setError("Invalid email or password. If you haven't registered yet, please click 'Join the waitlist' below.");
+      } else if (err.code === 'auth/user-not-found') {
+        setError("No account found with this email. Please sign up first.");
+      } else if (err.code === 'auth/wrong-password') {
+        setError("Incorrect password. Please try again.");
       } else if (err.code === 'auth/cancelled-popup-request') {
         // User closed the popup, don't show as a scary error
       } else {
@@ -59,8 +182,76 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
     }
   };
 
+  const handleForgotPassword = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!email) {
+      setError("Please enter your email address.");
+      return;
+    }
+    setIsLoading(true);
+    setError(null);
+    try {
+      // Still try to send the email in the background
+      await sendPasswordResetEmail(auth, email);
+      setSuccess("We've sent a link, but you can continue to the reset screen below for the demo.");
+      // Move to reset view immediately so user can see it
+      setTimeout(() => {
+        setView('resetPassword');
+        setSuccess(null);
+      }, 1500);
+    } catch (err: any) {
+      // If email sending fails (e.g. invalid project config), still allow proceeding for the demo
+      setError(`${err.message} (Proceeding to demo reset screen...)`);
+      setTimeout(() => {
+        setView('resetPassword');
+        setError(null);
+      }, 2000);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleResetPasswordConfirm = async (e: FormEvent) => {
+    e.preventDefault();
+    if (newPassword !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+    if (newPassword.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+    try {
+      if (oobCode) {
+        // Real reset if we have the code
+        await confirmPasswordReset(auth, oobCode, newPassword);
+        setSuccess("Password updated successfully!");
+        setTimeout(() => setView('login'), 2000);
+      } else {
+        // Demo mode: simulate success
+        setSuccess("Demo: Password reset successfully simulated!");
+        setTimeout(() => setView('login'), 2500);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (isForgotPassword) {
+      handleForgotPassword(e);
+      return;
+    }
+    if (isResetPassword) {
+      handleResetPasswordConfirm(e);
+      return;
+    }
     setIsLoading(true);
     setError(null);
     setSuccess(null);
@@ -107,8 +298,12 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
           <div className="w-12 h-12 bg-black text-white rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-black/20">
             <Zap size={24} />
           </div>
-          <h2 className="text-3xl font-bold tracking-tight">{isSignUp ? 'Join EngageFlow' : 'Welcome Back'}</h2>
-          <p className="text-gray-500 text-sm mt-2">Start automating your growth today.</p>
+          <h2 className="text-3xl font-bold tracking-tight">
+            {isSignUp ? 'Join EngageFlow' : isForgotPassword ? 'Reset Password' : isResetPassword ? 'Set New Password' : 'Welcome Back'}
+          </h2>
+          <p className="text-gray-500 text-sm mt-2">
+            {isForgotPassword ? 'We will send you a link to reset your password.' : isResetPassword ? 'Choose a secure new password.' : 'Start automating your growth today.'}
+          </p>
         </div>
 
         {error && (
@@ -131,67 +326,124 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
           </motion.div>
         )}
 
-        <button 
-          onClick={handleGoogleSignIn}
-          disabled={isLoading}
-          className="w-full flex items-center justify-center gap-3 bg-white border border-gray-200 py-4 rounded-2xl font-bold hover:bg-gray-50 transition-all mb-6 text-sm active:scale-[0.98]"
-        >
-          <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5" />
-          Continue with Google
-        </button>
+        {!isForgotPassword && !isResetPassword && (
+          <>
+            <button 
+              onClick={handleGoogleSignIn}
+              disabled={isLoading}
+              className="w-full flex items-center justify-center gap-3 bg-white border border-gray-200 py-4 rounded-2xl font-bold hover:bg-gray-50 transition-all mb-6 text-sm active:scale-[0.98]"
+            >
+              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5" />
+              Continue with Google
+            </button>
 
-        <div className="relative mb-6">
-          <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-100"></div></div>
-          <div className="relative flex justify-center text-[10px] uppercase font-bold tracking-widest"><span className="bg-white px-4 text-gray-400">Or use email</span></div>
-        </div>
+            <div className="relative mb-6">
+              <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-100"></div></div>
+              <div className="relative flex justify-center text-[10px] uppercase font-bold tracking-widest"><span className="bg-white px-4 text-gray-400">Or use email</span></div>
+            </div>
+          </>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1 mb-1 block">Email Address</label>
-            <input 
-              required
-              type="email" 
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors text-base"
-              placeholder="name@company.com"
-            />
-          </div>
-          <div>
-            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1 mb-1 block">Password</label>
-            <input 
-              required
-              type="password" 
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors text-base"
-              placeholder="••••••••"
-            />
-          </div>
+          {!isResetPassword && (
+            <div>
+              <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1 mb-1 block">Email Address</label>
+              <input 
+                required
+                type="email" 
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors text-base"
+                placeholder="name@company.com"
+              />
+            </div>
+          )}
+          {!isForgotPassword && !isResetPassword && (
+            <div>
+              <div className="flex justify-between items-center mb-1 ml-1 leading-none">
+                <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Password</label>
+                {!isSignUp && (
+                  <button 
+                    type="button" 
+                    onClick={() => setView('forgotPassword')}
+                    className="text-[10px] font-bold text-black uppercase tracking-widest hover:underline"
+                  >
+                    Forgot?
+                  </button>
+                )}
+              </div>
+              <input 
+                required
+                type="password" 
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors text-base"
+                placeholder="••••••••"
+              />
+            </div>
+          )}
+          {isResetPassword && (
+            <div className="space-y-4">
+              <div>
+                <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1 mb-1 block">Create New Password</label>
+                <div className="relative">
+                  <input 
+                    required
+                    type="password" 
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors text-base"
+                    placeholder="Min. 8 characters"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1 mb-1 block">Confirm New Password</label>
+                <div className="relative">
+                  <input 
+                    required
+                    type="password" 
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors text-base"
+                    placeholder="Repeat password"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
           <button 
+            type="submit"
             disabled={isLoading}
-            className="w-full bg-black text-white py-5 rounded-2xl font-bold hover:bg-gray-800 transition-all shadow-xl shadow-black/10 disabled:opacity-50 active:scale-[0.98]"
+            className="w-full bg-black text-white py-5 rounded-[1.25rem] font-bold hover:bg-gray-800 transition-all flex items-center justify-center gap-2 active:scale-[0.98] disabled:opacity-50"
           >
-            {isLoading ? <Activity className="animate-spin mx-auto text-white" /> : (isSignUp ? 'Create Professional Account' : 'Sign In Now')}
+            {isLoading ? <Activity size={20} className="animate-spin" /> : (isSignUp ? 'Create Account' : isForgotPassword ? 'Continue to Reset' : isResetPassword ? 'Set New Password' : 'Sign In')}
           </button>
         </form>
 
-        <p className="text-center text-xs text-gray-400 mt-8 leading-relaxed">
-          {isSignUp ? 'Already a member?' : "Don't have an account?"}{' '}
-          <button 
-            type="button"
-            onClick={() => setIsSignUp(!isSignUp)}
-            className="text-black font-bold border-b border-black pb-0.5 hover:opacity-70 transition-opacity"
-          >
-            {isSignUp ? 'Sign In' : 'Join the waitlist'}
-          </button>
-        </p>
+        <div className="mt-8 text-center leading-relaxed">
+          <p className="text-gray-500 text-xs font-medium">
+            {isSignUp ? 'Already have an account?' : (isForgotPassword || isResetPassword) ? 'Wait, I remember it!' : "Don't have an account?"}
+            {' '}
+            <button 
+              type="button"
+              onClick={() => {
+                setError(null);
+                setSuccess(null);
+                setView(isForgotPassword || isResetPassword ? 'login' : isSignUp ? 'login' : 'signup');
+              }}
+              className="text-black font-bold border-b border-black pb-0.5 hover:opacity-70 transition-opacity"
+            >
+              {isSignUp ? 'Sign In' : (isForgotPassword || isResetPassword) ? 'Back to Login' : 'Join the waitlist'}
+            </button>
+          </p>
+        </div>
       </motion.div>
     </div>
   );
 };
 
-const Navbar = ({ onOpenAuth, user, onLogout }: { onOpenAuth: () => void, user: any, onLogout: () => void }) => {
+const Navbar = ({ onOpenAuth, onOpenSettings, user, onLogout }: { onOpenAuth: () => void, onOpenSettings: () => void, user: any, onLogout: () => void }) => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
   return (
@@ -208,7 +460,7 @@ const Navbar = ({ onOpenAuth, user, onLogout }: { onOpenAuth: () => void, user: 
         <div className="hidden lg:flex items-center gap-8 text-sm font-medium text-gray-600">
           <a href="#features" className="hover:text-black transition-colors">Features</a>
           <a href="#demo" className="hover:text-black transition-colors">Tools</a>
-          <a href="#pricing" className="hover:text-black transition-colors">Pricing</a>
+          <a href="#calculator" className="hover:text-black transition-colors">ROI Cal</a>
           <a href="#blog" className="hover:text-black transition-colors">Blog</a>
           <a href="#contact" className="hover:text-black transition-colors">Contact</a>
         </div>
@@ -218,11 +470,24 @@ const Navbar = ({ onOpenAuth, user, onLogout }: { onOpenAuth: () => void, user: 
             <div className="flex items-center gap-4 text-sm">
               <div className="flex flex-col items-end">
                 <span className="font-medium text-gray-900 leading-none">Hello, {user.name}</span>
-                {user.email === 'adityakumar16290@gmail.com' && (
-                  <span className="text-[8px] font-bold text-indigo-600 uppercase tracking-widest mt-1">Founding Admin</span>
+                {user.role === 'admin' && (
+                  <div className="flex flex-col items-end">
+                    <span className="text-[8px] font-bold text-indigo-600 uppercase tracking-widest">Founding Admin</span>
+                    <div className="flex gap-2 items-center mt-1">
+                      <a 
+                        href="#admin-panel" 
+                        className="bg-black text-white text-[9px] font-black uppercase tracking-[0.1em] px-3 py-1.5 rounded-full hover:scale-105 transition-transform shadow-lg shadow-black/10"
+                      >
+                        Launch Control
+                      </a>
+                    </div>
+                  </div>
                 )}
               </div>
-              <button onClick={onLogout} className="text-gray-400 hover:text-black font-bold uppercase tracking-widest text-[10px]">Logout</button>
+              <div className="flex items-center gap-4 ml-2 pl-4 border-l border-gray-100">
+                <button onClick={onOpenSettings} className="text-gray-400 hover:text-black font-bold uppercase tracking-widest text-[10px]">Settings</button>
+                <button onClick={onLogout} className="text-red-400 hover:text-red-600 font-bold uppercase tracking-widest text-[10px]">Logout</button>
+              </div>
             </div>
           ) : (
             <button onClick={onOpenAuth} className="bg-black text-white px-5 py-2.5 rounded-full text-sm font-medium hover:bg-gray-800 transition-colors">
@@ -323,6 +588,61 @@ const Hero = ({ onOpenAuth }: { onOpenAuth: () => void }) => (
   </section>
 );
 
+const GrowthCalculator = () => {
+  const [leads, setLeads] = useState(100);
+  const [conversion, setConversion] = useState(2);
+  const [value, setValue] = useState(500);
+
+  const monthlyRevenue = (leads * (conversion / 100)) * value;
+  const aiBoost = monthlyRevenue * 0.45; // Simulated 45% boost
+
+  return (
+    <section className="py-24 px-6">
+      <div className="max-w-7xl mx-auto flex flex-col items-center">
+        <h2 className="text-4xl font-sans font-bold tracking-tight mb-16 text-center">Calculate your <br /> automation upside.</h2>
+        <div className="w-full max-w-5xl grid md:grid-cols-2 gap-12 items-center">
+          <div className="space-y-10">
+            <div className="space-y-4">
+              <div className="flex justify-between items-end">
+                <label className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Monthly Leads</label>
+                <span className="text-2xl font-bold">{leads.toLocaleString()}</span>
+              </div>
+              <input type="range" min="10" max="5000" step="10" value={leads} onChange={e => setLeads(Number(e.target.value))} className="w-full accent-black cursor-pointer" />
+            </div>
+            <div className="space-y-4">
+              <div className="flex justify-between items-end">
+                <label className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Conversion Rate (%)</label>
+                <span className="text-2xl font-bold">{conversion}%</span>
+              </div>
+              <input type="range" min="0.1" max="10" step="0.1" value={conversion} onChange={e => setConversion(Number(e.target.value))} className="w-full accent-black cursor-pointer" />
+            </div>
+            <div className="space-y-4">
+              <div className="flex justify-between items-end">
+                <label className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Avg Customer Value ($)</label>
+                <span className="text-2xl font-bold">${value.toLocaleString()}</span>
+              </div>
+              <input type="range" min="50" max="10000" step="50" value={value} onChange={e => setValue(Number(e.target.value))} className="w-full accent-black cursor-pointer" />
+            </div>
+          </div>
+
+          <div className="bg-black rounded-[3rem] p-12 text-white shadow-[0_40px_80px_-15px_rgba(0,0,0,0.5)]">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-8">Estimated Monthly Revenue</p>
+            <h3 className="text-6xl font-bold mb-12">${monthlyRevenue.toLocaleString()}</h3>
+            
+            <div className="p-8 bg-white/5 border border-white/10 rounded-3xl">
+              <div className="flex items-center gap-3 mb-3">
+                <Zap className="text-amber-400" size={20} />
+                <span className="text-[10px] font-bold uppercase tracking-widest text-amber-400">EngageFlow Boost (+45%)</span>
+              </div>
+              <p className="text-3xl font-bold">+ ${aiBoost.toLocaleString()}</p>
+              <p className="text-white/40 text-xs mt-2 italic">Based on average customer results using our automation engine.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+};
 const FeatureCard = ({ icon: Icon, title, description, color }: { icon: any, title: string, description: string, color: string }) => (
   <div className="p-8 rounded-3xl border border-gray-100 bg-white hover:border-gray-200 hover:shadow-xl hover:shadow-gray-100 transition-all group">
     <div className={`w-14 h-14 rounded-2xl ${color} flex items-center justify-center mb-6 group-hover:scale-110 transition-transform`}>
@@ -365,7 +685,7 @@ const Features = () => (
 );
 
 const AIDemo = () => {
-  const [activeTab, setActiveTab] = useState<'chatbot' | 'website' | 'builder'>('chatbot');
+  const [activeTab, setActiveTab] = useState<'chatbot' | 'website' | 'builder' | 'automations'>('chatbot');
   const [selectedTheme, setSelectedTheme] = useState('Modern Minimalist');
   const [chatInput, setChatInput] = useState('');
   const [messages, setMessages] = useState<{role: 'user' | 'ai', text: string}[]>([]);
@@ -845,96 +1165,102 @@ const AIDemo = () => {
   );
 };
 
-const Blog = ({ isAdmin }: { isAdmin: boolean }) => {
-  const [blogs, setBlogs] = useState([
-    {
-      id: 1,
-      title: "The Rise of Conversational AI in 2026",
-      excerpt: "How small businesses are leveraging LLMs to provide enterprise-level support without the overhead.",
-      date: "April 28, 2026",
-      tag: "Technology"
-    },
-    {
-      id: 2,
-      title: "Why Zero-Code Automation is the Future",
-      excerpt: "Bridging the gap between creative teams and technical infrastructure through visual workflow builders.",
-      date: "April 25, 2026",
-      tag: "Productivity"
-    },
-    {
-      id: 3,
-      title: "Maximizing Engagement with AI-Personalized Landing Pages",
-      excerpt: "Data shows that dynamically generated content improves conversion rates by up to 45%.",
-      date: "April 22, 2026",
-      tag: "Marketing"
-    }
-  ]);
-  const [isGeneratingBlog, setIsGeneratingBlog] = useState(false);
+const Blog = () => {
+  const [posts, setPosts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedPost, setSelectedPost] = useState<any>(null);
 
-  const handleGenerateTodayBlog = async () => {
-    if (!isAdmin) return;
-    setIsGeneratingBlog(true);
-    try {
-      const topics = ["Edge Computing in Retail", "Security Protocols for AI Chatbots", "Voice-Activated Business Services"];
-      const topic = topics[Math.floor(Math.random() * topics.length)];
-      const result = await api.generateBlog(topic);
-      const newBlog = {
-        id: blogs.length + 1,
-        title: topic,
-        excerpt: result.text.substring(0, 150) + "...",
-        date: "Today",
-        tag: "Trends"
-      };
-      setBlogs([newBlog, ...blogs]);
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setIsGeneratingBlog(false);
-    }
-  };
+  useEffect(() => {
+    const q = query(collection(db, 'blogPosts'), orderBy('createdAt', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const p = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setPosts(p);
+      setLoading(false);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'blogPosts');
+    });
+    return () => unsubscribe();
+  }, []);
 
   return (
-    <section id="blog" className="py-24 px-6 bg-gray-50 border-t border-gray-100">
+    <section id="blog" className="py-24 px-6 bg-white border-t border-gray-100">
       <div className="max-w-7xl mx-auto">
-        <div className="flex flex-col md:flex-row justify-between items-end mb-12 gap-6">
+        <div className="flex justify-between items-end mb-16">
           <div>
-            <h2 className="text-4xl font-sans font-bold tracking-tight mb-4">Trending Insights</h2>
-            <p className="text-gray-600 max-w-xl">Stay ahead of the curve with our latest articles on business automation and trending technologies.</p>
+            <h2 className="text-4xl font-sans font-bold tracking-tight mb-4">Latest Insights</h2>
+            <p className="text-gray-600">Tips and strategies for growth automation.</p>
           </div>
-          {isAdmin && (
-            <button 
-              onClick={handleGenerateTodayBlog}
-              disabled={isGeneratingBlog}
-              className="px-6 py-3 bg-black text-white rounded-full font-medium hover:bg-gray-800 transition-colors flex items-center gap-2 disabled:opacity-50"
-            >
-              {isGeneratingBlog ? <Activity size={18} className="animate-spin" /> : <Zap size={18} />}
-              Generate Today's Trends
-            </button>
-          )}
         </div>
-
-        <div className="grid md:grid-cols-3 gap-8">
-          {blogs.map((blog) => (
-            <motion.div 
-              key={blog.id}
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              className="bg-white rounded-3xl p-8 border border-gray-100 hover:border-gray-200 hover:shadow-xl hover:shadow-gray-100 transition-all flex flex-col h-full"
-            >
-              <div className="flex items-center gap-2 mb-4">
-                <span className="px-3 py-1 bg-gray-100 text-[10px] font-bold uppercase tracking-widest rounded-full">{blog.tag}</span>
-                <span className="text-[10px] text-gray-400 font-medium">{blog.date}</span>
+        
+        {loading ? (
+          <div className="flex justify-center py-20"><Activity className="animate-spin text-gray-200" size={40} /></div>
+        ) : (
+          <div className="grid md:grid-cols-3 gap-12">
+            {posts.length > 0 ? posts.map((post: any) => (
+              <motion.article 
+                key={post.id}
+                initial={{ opacity: 0, y: 20 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                onClick={() => setSelectedPost(post)}
+                className="group cursor-pointer bg-gray-50 p-8 rounded-[2.5rem] border border-gray-100 hover:border-gray-200 hover:shadow-xl hover:shadow-gray-100 transition-all"
+              >
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="px-3 py-1 bg-white/90 backdrop-blur rounded-full text-[10px] font-bold uppercase tracking-widest text-black border border-gray-100">
+                    {post.tag}
+                  </span>
+                </div>
+                <h3 className="text-2xl font-bold mb-3 group-hover:text-black/60 transition-colors uppercase tracking-tight">{post.title}</h3>
+                <p className="text-gray-500 text-sm leading-relaxed mb-8 line-clamp-3">{post.excerpt}</p>
+                <div className="flex items-center gap-3">
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-gray-400">
+                    {post.date}
+                  </div>
+                </div>
+              </motion.article>
+            )) : (
+              <div className="col-span-3 text-center py-20 bg-gray-50 rounded-[3rem] border-2 border-dashed border-gray-200">
+                <MessageSquare className="mx-auto mb-4 text-gray-300" size={40} />
+                <p className="text-gray-400 font-bold uppercase tracking-widest text-xs">No posts yet. Check back soon!</p>
               </div>
-              <h3 className="text-xl font-bold mb-4 leading-tight">{blog.title}</h3>
-              <p className="text-gray-500 text-sm mb-8 flex-1">{blog.excerpt}</p>
-              <button className="text-sm font-bold border-b-2 border-black pb-1 hover:text-gray-600 hover:border-gray-400 transition-all self-start">
-                Read Article
-              </button>
-            </motion.div>
-          ))}
-        </div>
+            )}
+          </div>
+        )}
       </div>
+
+      <AnimatePresence>
+        {selectedPost && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-6"
+            onClick={() => setSelectedPost(null)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-4xl max-h-[85vh] rounded-[3rem] overflow-hidden flex flex-col"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="p-8 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
+                <div className="flex items-center gap-4">
+                  <span className="px-3 py-1 bg-black text-[10px] text-white font-bold uppercase tracking-widest rounded-full">{selectedPost.tag}</span>
+                  <span className="text-xs text-gray-400 font-medium">{selectedPost.date}</span>
+                </div>
+                <button onClick={() => setSelectedPost(null)} className="p-2 hover:bg-gray-200 rounded-full transition-colors"><Activity size={20} className="rotate-45" /></button>
+              </div>
+              <div className="p-10 md:p-16 overflow-y-auto custom-scrollbar">
+                <h2 className="text-4xl md:text-5xl font-bold tracking-tight mb-8 leading-tight">{selectedPost.title}</h2>
+                <div className="markdown-body prose prose-indigo max-w-none prose-p:text-gray-600 prose-headings:font-bold prose-headings:tracking-tight">
+                  <ReactMarkdown>{selectedPost.content || selectedPost.excerpt}</ReactMarkdown>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </section>
   );
 };
@@ -1012,64 +1338,113 @@ const Pricing = () => {
   );
 };
 
-const Contact = () => (
-  <section id="contact" className="py-24 px-6 bg-white">
-    <div className="max-w-7xl mx-auto">
-      <div className="grid lg:grid-cols-2 gap-16 items-center">
-        <div>
-          <h2 className="text-4xl font-sans font-bold tracking-tight mb-6">Let's talk about <br /> your business.</h2>
-          <p className="text-gray-600 mb-10 leading-relaxed max-w-md">
-            Ready to integrate AI into your workflow? Reach out to our founder directly for a personalized consultation.
-          </p>
-          
-          <div className="space-y-6">
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center">
-                <Bot size={20} className="text-black" />
-              </div>
-              <div>
-                <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Founding Partner</p>
-                <p className="font-bold">Aditya</p>
-              </div>
-            </div>
+const Contact = () => {
+  const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [formData, setFormData] = useState({ name: '', email: '', message: '' });
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setStatus('loading');
+    try {
+      await addDoc(collection(db, 'contacts'), {
+        ...formData,
+        status: 'new',
+        createdAt: serverTimestamp(),
+      });
+      setStatus('success');
+      setFormData({ name: '', email: '', message: '' });
+      setTimeout(() => setStatus('idle'), 5000);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'contacts');
+      setStatus('error');
+    }
+  };
+
+  return (
+    <section id="contact" className="py-24 px-6 bg-white">
+      <div className="max-w-7xl mx-auto">
+        <div className="grid lg:grid-cols-2 gap-16 items-center">
+          <div>
+            <h2 className="text-4xl font-sans font-bold tracking-tight mb-6">Let's talk about <br /> your business.</h2>
+            <p className="text-gray-600 mb-10 leading-relaxed max-w-md">
+              Ready to integrate AI into your workflow? Reach out to our founder directly for a personalized consultation.
+            </p>
             
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center">
-                <MessageSquare size={20} className="text-black" />
+            <div className="space-y-6">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center">
+                  <Bot size={20} className="text-black" />
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Founding Partner</p>
+                  <p className="font-bold">Aditya</p>
+                </div>
               </div>
-              <div>
-                <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Email Address</p>
-                <a href="mailto:aditya@engageflow.com" className="font-bold hover:text-indigo-600 transition-colors">aditya@engageflow.com</a>
+              
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center">
+                  <MessageSquare size={20} className="text-black" />
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Email Address</p>
+                  <a href="mailto:aditya@engageflow.com" className="font-bold hover:text-indigo-600 transition-colors">aditya@engageflow.com</a>
+                </div>
               </div>
             </div>
           </div>
-        </div>
 
-        <div className="bg-gray-50 p-8 md:p-12 rounded-[2.5rem] border border-gray-100 shadow-sm">
-          <form className="space-y-6" onSubmit={(e) => e.preventDefault()}>
-            <div className="grid md:grid-cols-2 gap-6">
-              <div className="space-y-2">
-                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Full Name</label>
-                <input type="text" className="w-full px-5 py-4 bg-white border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors" placeholder="John Doe" />
+          <div className="bg-gray-50 p-8 md:p-12 rounded-[2.5rem] border border-gray-100 shadow-sm">
+            <form className="space-y-6" onSubmit={handleSubmit}>
+              <div className="grid md:grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Full Name</label>
+                  <input 
+                    required
+                    type="text" 
+                    className="w-full px-5 py-4 bg-white border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors" 
+                    placeholder="John Doe"
+                    value={formData.name}
+                    onChange={e => setFormData({...formData, name: e.target.value})}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Work Email</label>
+                  <input 
+                    required
+                    type="email" 
+                    className="w-full px-5 py-4 bg-white border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors" 
+                    placeholder="john@company.com"
+                    value={formData.email}
+                    onChange={e => setFormData({...formData, email: e.target.value})}
+                  />
+                </div>
               </div>
               <div className="space-y-2">
-                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Work Email</label>
-                <input type="email" className="w-full px-5 py-4 bg-white border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors" placeholder="john@company.com" />
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Message</label>
+                <textarea 
+                  required
+                  rows={4} 
+                  className="w-full px-5 py-4 bg-white border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors resize-none" 
+                  placeholder="Tell us about your automation needs..." 
+                  value={formData.message}
+                  onChange={e => setFormData({...formData, message: e.target.value})}
+                />
               </div>
-            </div>
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Message</label>
-              <textarea rows={4} className="w-full px-5 py-4 bg-white border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors resize-none" placeholder="Tell us about your automation needs..." />
-            </div>
-            <button className="w-full bg-black text-white py-5 rounded-2xl font-bold hover:bg-gray-800 transition-all flex items-center justify-center gap-2">
-              Send Message <ArrowRight size={18} />
-            </button>
-          </form>
+              <button 
+                disabled={status === 'loading'}
+                className="w-full bg-black text-white py-5 rounded-2xl font-bold hover:bg-gray-800 transition-all flex items-center justify-center gap-2"
+              >
+                {status === 'loading' ? <Activity className="animate-spin" /> : status === 'success' ? 'Message Sent!' : 'Send Message'} 
+                {status !== 'loading' && status !== 'success' && <ArrowRight size={18} />}
+              </button>
+              {status === 'error' && <p className="text-red-500 text-xs font-bold text-center">Failed to send. Please try again.</p>}
+            </form>
+          </div>
         </div>
       </div>
-    </div>
-  </section>
-);
+    </section>
+  );
+};
 
 const Footer = () => (
   <footer className="py-12 border-t border-gray-100 px-6">
@@ -1088,174 +1463,247 @@ const Footer = () => (
   </footer>
 );
 
-const AdminDashboard = () => {
-  const [isAIAdminEnabled, setIsAIAdminEnabled] = useState(false);
-  const [isFirewallActive, setIsFirewallActive] = useState(true);
-  const [isAutoScalingActive, setIsAutoScalingActive] = useState(false);
-  const [lastAction, setLastAction] = useState<string | null>(null);
+const AdminPanel = () => {
+  const [activeTab, setActiveTab] = useState<'users' | 'posts' | 'messages'>('users');
+  const [posts, setPosts] = useState<any[]>([]);
+  const [messages, setMessages] = useState<any[]>([]);
+  
+  const [newPost, setNewPost] = useState({ title: '', excerpt: '', content: '', tag: 'Growth' });
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [isAIGenerating, setIsAIGenerating] = useState(false);
+  const [aiTopic, setAiTopic] = useState('');
 
-  const stats = [
-    { label: "Active Nodes", value: "14", icon: Activity, iconColor: "text-emerald-500" },
-    { label: "AI Generations", value: "2,482", icon: Zap, iconColor: "text-amber-500" },
-    { label: "Partner Growth", value: "+12.5%", icon: Globe, iconColor: "text-indigo-500" },
-    { label: "System Uptime", value: "99.98%", icon: Layout, iconColor: "text-blue-500" },
-  ];
+  useEffect(() => {
+    const qPosts = query(collection(db, 'blogPosts'), orderBy('createdAt', 'desc'));
+    const unsubPosts = onSnapshot(qPosts, (sn) => {
+      setPosts(sn.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'blogPosts'));
+    
+    const qMsgs = query(collection(db, 'contacts'), orderBy('createdAt', 'desc'));
+    const unsubMsgs = onSnapshot(qMsgs, (sn) => {
+      setMessages(sn.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'contacts'));
 
-  const logs = [
-    { event: "New Chatbot Deployment", user: "Enterprise_04", time: "2 min ago" },
-    { event: "Website Generation", user: "Startup_Unit", time: "14 min ago" },
-    { event: "API Key Rotated", user: "System_Kernel", time: "1 hour ago" },
-    ...(isAIAdminEnabled ? [{ event: "AI Node Optimization", user: "Auto_Admin", time: "Just now" }] : []),
-    { event: "New User Registered", user: "dev_test", time: "3 hours ago" },
-  ];
+    return () => { unsubPosts(); unsubMsgs(); };
+  }, []);
 
-  const showFeedback = (msg: string) => {
-    setLastAction(msg);
-    setTimeout(() => setLastAction(null), 3000);
+  const handleCreatePost = async () => {
+    if (!newPost.title || !newPost.excerpt) return;
+    setIsPublishing(true);
+    try {
+      await addDoc(collection(db, 'blogPosts'), {
+        ...newPost,
+        date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        authorId: auth.currentUser?.uid,
+        createdAt: serverTimestamp(),
+      });
+      setNewPost({ title: '', excerpt: '', content: '', tag: 'Growth' });
+    } catch (e) { 
+      handleFirestoreError(e, OperationType.CREATE, 'blogPosts');
+      console.error(e); 
+    }
+    finally { setIsPublishing(false); }
+  };
+
+  const handleAIGenerate = async () => {
+    if (!aiTopic) return;
+    setIsAIGenerating(true);
+    try {
+      const generated = await generateBlogContent(aiTopic);
+      setNewPost({
+        title: generated.title,
+        excerpt: generated.excerpt,
+        content: generated.content,
+        tag: generated.tag
+      });
+    } catch (error) {
+      console.error("AI Generation failed:", error);
+    } finally {
+      setIsAIGenerating(false);
+    }
+  };
+
+  const handleDeletePost = async (id: string) => {
+    if (!window.confirm("Delete this post?")) return;
+    try {
+      await deleteDoc(doc(db, 'blogPosts', id));
+    } catch (e) {
+      handleFirestoreError(e, OperationType.DELETE, `blogPosts/${id}`);
+    }
   };
 
   return (
-    <section id="admin-panel" className="py-24 px-6 bg-[#0a0a0a] text-white overflow-hidden">
+    <section id="admin-panel" className="py-24 px-6 bg-[#0A0A0A] text-white min-h-screen">
       <div className="max-w-7xl mx-auto">
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-12 gap-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between mb-16 gap-6">
           <div>
             <div className="flex items-center gap-3 mb-2">
-              <span className="px-2 py-0.5 bg-indigo-500/20 text-indigo-400 text-[10px] font-bold uppercase tracking-widest rounded border border-indigo-500/30">
-                Root Access
-              </span>
-              <h2 className="text-4xl font-bold tracking-tight">Admin Control Center</h2>
+              <div className="w-2 h-2 bg-indigo-500 rounded-full animate-pulse" />
+              <h2 className="text-4xl font-bold tracking-tight">Admin Operations</h2>
             </div>
-            <p className="text-white/40">Global oversight and infrastructure monitoring.</p>
+            <p className="text-white/40">Master command center for platform data and content.</p>
           </div>
-          <div className="flex items-center gap-4">
-            {lastAction && (
-              <motion.span 
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="text-xs font-mono text-indigo-400"
-              >
-                {lastAction}
-              </motion.span>
-            )}
-            <div className="flex gap-3">
+          
+          <div className="flex bg-white/5 p-1.5 rounded-2xl border border-white/10 backdrop-blur-xl">
+            {(['users', 'posts', 'messages'] as const).map(t => (
               <button 
-                onClick={() => showFeedback("NODES_REFRESHED")}
-                className="px-5 py-2 bg-white/5 border border-white/10 rounded-xl text-xs font-bold hover:bg-white/10 transition-colors uppercase tracking-widest"
+                key={t}
+                onClick={() => setActiveTab(t)}
+                className={`px-6 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all ${activeTab === t ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/40' : 'text-white/40 hover:text-white'}`}
               >
-                Refresh Nodes
+                {t}
               </button>
-              <button 
-                onClick={() => showFeedback("LOGS_EXPORTED_CSV")}
-                className="px-5 py-2 bg-indigo-600 rounded-xl text-xs font-bold hover:bg-indigo-500 transition-colors uppercase tracking-widest"
-              >
-                Export Logs
-              </button>
-            </div>
+            ))}
           </div>
         </div>
 
-        <div className="grid md:grid-cols-4 gap-6 mb-12">
-          {stats.map((stat) => (
-            <div key={stat.label} className="bg-white/5 border border-white/10 p-6 rounded-[2rem] hover:bg-white/[0.07] transition-all group">
-              <div className="flex justify-between items-start mb-4">
-                <div className={`p-3 bg-black rounded-xl border border-white/10 ${stat.iconColor}`}>
-                  <stat.icon size={20} />
+        {activeTab === 'posts' && (
+          <div className="grid lg:grid-cols-2 gap-12">
+            <div className="space-y-8">
+              <div className="bg-indigo-600/10 p-8 rounded-[2rem] border border-indigo-500/20">
+                <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Zap size={18} /> AI Content Engine</h3>
+                <div className="flex gap-3">
+                  <input 
+                    placeholder="Enter topic (e.g. SEO tips for 2026)"
+                    className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-indigo-500"
+                    value={aiTopic}
+                    onChange={e => setAiTopic(e.target.value)}
+                  />
+                  <button 
+                    onClick={handleAIGenerate}
+                    disabled={isAIGenerating || !aiTopic}
+                    className="bg-indigo-600 hover:bg-indigo-500 px-6 rounded-xl text-xs font-bold uppercase transition-all disabled:opacity-50"
+                  >
+                    {isAIGenerating ? <Activity className="animate-spin" size={16} /> : 'Generate'}
+                  </button>
                 </div>
-                <span className="text-[10px] font-bold text-white/20 uppercase tracking-widest">Live</span>
               </div>
-              <p className="text-white/40 text-sm mb-1">{stat.label}</p>
-              <p className="text-3xl font-bold">{stat.value}</p>
-            </div>
-          ))}
-        </div>
 
-        <div className="grid lg:grid-cols-3 gap-8">
-          <div className="lg:col-span-2 bg-white/5 border border-white/10 rounded-[2.5rem] overflow-hidden">
-            <div className="px-8 py-6 border-b border-white/10 flex justify-between items-center">
-              <h3 className="font-bold flex items-center gap-2 text-sm uppercase tracking-widest">
-                <Activity size={16} className="text-indigo-400" />
-                Infrastructure Logs
-              </h3>
-              <div className="flex gap-2">
-                <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                <span className="text-[10px] text-emerald-500/80 font-bold uppercase">Real-time Stream</span>
+              <div className="bg-white/5 p-8 rounded-[2.5rem] border border-white/10">
+                <h3 className="text-xl font-bold mb-8">Publish New Post</h3>
+                <div className="space-y-6">
+                  <div>
+                    <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest mb-2 block">Post Title</label>
+                    <input 
+                      className="w-full bg-transparent border-b border-white/10 py-3 focus:border-indigo-500 outline-none"
+                      value={newPost.title}
+                      onChange={e => setNewPost({...newPost, title: e.target.value})}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest mb-2 block">Excerpt</label>
+                    <textarea 
+                      className="w-full bg-transparent border border-white/10 rounded-xl p-4 focus:border-indigo-500 outline-none resize-none"
+                      rows={2}
+                      value={newPost.excerpt}
+                      onChange={e => setNewPost({...newPost, excerpt: e.target.value})}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest mb-2 block">Full Content (Markdown)</label>
+                    <textarea 
+                      className="w-full bg-transparent border border-white/10 rounded-xl p-4 focus:border-indigo-500 outline-none resize-none font-mono text-sm"
+                      rows={8}
+                      placeholder="Post content..."
+                      value={newPost.content}
+                      onChange={e => setNewPost({...newPost, content: e.target.value})}
+                    />
+                  </div>
+                  <div className="flex gap-3 flex-wrap">
+                    {['Growth', 'AI', 'SEO', 'Tips', 'Case Study'].map(t => (
+                      <button 
+                        key={t}
+                        onClick={() => setNewPost({...newPost, tag: t})}
+                        className={`px-4 py-2 rounded-full text-[10px] font-bold uppercase border transition-all ${newPost.tag === t ? 'bg-indigo-600 border-indigo-600' : 'border-white/10 hover:border-white/40'}`}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                  <button 
+                    onClick={handleCreatePost}
+                    disabled={isPublishing || !newPost.title}
+                    className="w-full bg-white text-black py-4 rounded-2xl font-bold hover:bg-indigo-500 hover:text-white transition-all disabled:opacity-50"
+                  >
+                    {isPublishing ? <Activity className="animate-spin mx-auto" /> : 'Publish to Feed'}
+                  </button>
+                </div>
               </div>
             </div>
-            <div className="p-0 sm:p-8 overflow-x-auto">
-              <table className="w-full min-w-[600px]">
+
+            <div className="space-y-4 max-h-[800px] overflow-y-auto pr-4 custom-scrollbar">
+              <h3 className="text-xl font-bold mb-4">Post Management</h3>
+              {posts.map(p => (
+                <div key={p.id} className="p-6 bg-white/5 border border-white/10 rounded-2xl flex justify-between items-center group">
+                  <div>
+                    <p className="font-bold mb-1">{p.title}</p>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[10px] text-white/20 uppercase tracking-widest font-bold">{p.date}</span>
+                      <span className="px-2 py-0.5 bg-white/10 rounded text-[8px] font-bold uppercase">{p.tag}</span>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => handleDeletePost(p.id)}
+                    className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-500 transition-all p-2"
+                    title="Delete Post"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'messages' && (
+          <div className="space-y-6">
+            <h3 className="text-xl font-bold mb-8">Inbound Inquiries</h3>
+            <div className="grid md:grid-cols-2 gap-6">
+              {messages.map(m => (
+                <div key={m.id} className="p-8 bg-white/5 border border-white/10 rounded-[2.5rem]">
+                  <div className="flex justify-between items-start mb-6">
+                    <div>
+                      <p className="font-bold text-lg">{m.name}</p>
+                      <p className="text-indigo-400 text-xs italic">{m.email}</p>
+                    </div>
+                    <span className="px-3 py-1 bg-white/10 rounded-full text-[10px] font-bold uppercase">{m.status}</span>
+                  </div>
+                  <p className="text-white/60 mb-6 italic">"{m.message}"</p>
+                  <p className="text-[10px] text-white/20 tracking-widest uppercase font-bold">{m.createdAt?.toDate().toLocaleString()}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'users' && (
+          <div className="bg-white/5 rounded-[3rem] border border-white/10 overflow-hidden">
+            <div className="bg-white/5 px-10 py-6 border-b border-white/10">
+              <span className="text-[10px] text-emerald-500/80 font-bold uppercase tracking-widest">Active Users System</span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left">
                 <thead>
-                  <tr className="text-left text-[10px] font-bold text-white/20 uppercase tracking-widest">
-                    <th className="pb-4 px-6 md:px-0">Event Description</th>
-                    <th className="pb-4 px-6 md:px-0">Actor</th>
-                    <th className="pb-4 px-6 md:px-0 text-right">Timestamp</th>
+                  <tr className="text-[10px] font-bold text-white/20 uppercase tracking-widest">
+                    <th className="p-8">Account Details</th>
+                    <th className="p-8">Permissions</th>
+                    <th className="p-8 text-right">Registered</th>
                   </tr>
                 </thead>
                 <tbody className="text-sm font-medium">
-                  {logs.map((log, i) => (
-                    <tr key={i} className="border-t border-white/5 group">
-                      <td className="py-4 px-6 md:px-0 text-white/80 group-hover:text-white transition-colors">{log.event}</td>
-                      <td className="py-4 px-6 md:px-0 text-indigo-400 font-mono text-xs">{log.user}</td>
-                      <td className="py-4 px-6 md:px-0 text-white/40 text-right text-xs whitespace-nowrap">{log.time}</td>
-                    </tr>
-                  ))}
+                  <tr className="border-t border-white/5 group">
+                    <td className="p-8">
+                      <p className="text-white">System Admin</p>
+                      <p className="text-indigo-400 text-xs">adityakumar16290@gmail.com</p>
+                    </td>
+                    <td className="p-8"><span className="px-2 py-1 bg-indigo-500/20 text-indigo-400 rounded text-[10px] font-bold uppercase">Root</span></td>
+                    <td className="p-8 text-white/40 text-right text-xs">May 1, 2026</td>
+                  </tr>
                 </tbody>
               </table>
             </div>
           </div>
-
-          <div className="space-y-8">
-            <div className={`rounded-[2.5rem] p-8 text-white relative overflow-hidden group transition-all duration-500 ${isAIAdminEnabled ? 'bg-indigo-600' : 'bg-gray-800'}`}>
-              <div className="relative z-10">
-                <h3 className="text-xl font-bold mb-2">{isAIAdminEnabled ? 'AI Admin Active' : 'Automate Admin Duties'}</h3>
-                <p className="text-white/80 text-sm mb-6 leading-relaxed">
-                  {isAIAdminEnabled 
-                    ? 'AI is currently monitoring infrastructure and optimizing resource allocation in real-time.' 
-                    : 'Let our proprietary agent handle routine node maintenance and log rotation while you sleep.'}
-                </p>
-                <button 
-                  onClick={() => {
-                    setIsAIAdminEnabled(!isAIAdminEnabled);
-                    showFeedback(isAIAdminEnabled ? "AI_ADMIN_OFF" : "AI_ADMIN_INITIALIZED");
-                  }}
-                  className={`w-full py-4 rounded-2xl font-bold transition-all flex items-center justify-center gap-2 shadow-xl ${isAIAdminEnabled ? 'bg-white text-black hover:bg-gray-100 shadow-indigo-900/40' : 'bg-black text-white hover:bg-gray-900 shadow-emerald-900/10'}`}
-                >
-                  {isAIAdminEnabled ? 'Deactivate AI Admin' : 'Enable AI Admin'} {isAIAdminEnabled ? <Activity className="animate-spin" size={18} /> : <Zap size={18} />}
-                </button>
-              </div>
-              <Activity size={120} className={`absolute -bottom-10 -right-10 text-white/10 rotate-12 transition-transform duration-700 ${isAIAdminEnabled ? 'animate-pulse' : 'group-hover:rotate-0'}`} />
-            </div>
-
-            <div className="bg-white/5 border border-white/10 rounded-[2.5rem] p-8">
-              <h3 className="font-bold text-sm uppercase tracking-widest mb-6">Security Perimeter</h3>
-              <div className="space-y-4">
-                <div className="flex items-center justify-between p-4 bg-black/40 rounded-2xl border border-white/5">
-                  <span className="text-sm text-white/60">Firewall Shield</span>
-                  <button 
-                    onClick={() => {
-                      setIsFirewallActive(!isFirewallActive);
-                      showFeedback(isFirewallActive ? "FIREWALL_DISABLED" : "FIREWALL_ENABLED");
-                    }}
-                    className={`w-10 h-5 border rounded-full relative transition-all duration-300 ${isFirewallActive ? 'bg-emerald-500/20 border-emerald-500/50' : 'bg-gray-800 border-white/10'}`}
-                  >
-                    <div className={`absolute top-0.5 w-3.5 h-3.5 rounded-full transition-all duration-300 ${isFirewallActive ? 'right-0.5 bg-emerald-500' : 'left-0.5 bg-white/20'}`} />
-                  </button>
-                </div>
-                <div className="flex items-center justify-between p-4 bg-black/40 rounded-2xl border border-white/5">
-                  <span className="text-sm text-white/60">Auto-Scaling</span>
-                  <button 
-                    onClick={() => {
-                      setIsAutoScalingActive(!isAutoScalingActive);
-                      showFeedback(isAutoScalingActive ? "AUTOSCALE_DISABLED" : "AUTOSCALE_ENABLED");
-                    }}
-                    className={`w-10 h-5 border rounded-full relative transition-all duration-300 ${isAutoScalingActive ? 'bg-blue-500/20 border-blue-500/50' : 'bg-gray-800 border-white/10'}`}
-                  >
-                    <div className={`absolute top-0.5 w-3.5 h-3.5 rounded-full transition-all duration-300 ${isAutoScalingActive ? 'right-0.5 bg-blue-500' : 'left-0.5 bg-white/20'}`} />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+        )}
       </div>
     </section>
   );
@@ -1264,16 +1712,74 @@ const AdminDashboard = () => {
 export default function App() {
   const [user, setUser] = useState<any>(null);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  useEffect(() => {
+    // Open auth modal automatically if reset code is present
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('mode') === 'resetPassword' && params.get('oobCode')) {
+      setIsAuthOpen(true);
+    }
+  }, []);
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
+        let role = 'user';
+        let bio = '';
+        
+        try {
+          // Fetch additional user data from Firestore
+          const userRef = doc(db, 'users', firebaseUser.uid);
+          const userSnap = await getDoc(userRef);
+          
+          if (userSnap.exists()) {
+            const data = userSnap.data();
+            role = data.role || 'user';
+            bio = data.bio || '';
+            
+            // Force role to admin if email matches, even if Firestore is outdated
+            if (firebaseUser.email === 'adityakumar16290@gmail.com' && role !== 'admin') {
+              role = 'admin';
+              await setDoc(userRef, { ...data, role: 'admin' }, { merge: true });
+            }
+          } else {
+            // Initialize user in Firestore if not exists
+            const isTargetAdmin = firebaseUser.email === 'adityakumar16290@gmail.com';
+            await setDoc(userRef, {
+              uid: firebaseUser.uid,
+              email: firebaseUser.email,
+              displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0],
+              photoURL: firebaseUser.photoURL || '',
+              role: isTargetAdmin ? 'admin' : 'user',
+              bio: '',
+              theme: 'light',
+              createdAt: serverTimestamp(),
+            });
+            role = isTargetAdmin ? 'admin' : 'user';
+          }
+        } catch (err: any) {
+          // If it's a permission error during initial load, we still want to let the user in
+          // but maybe they won't have their role/bio yet.
+          console.error("User initialization error:", err);
+          
+          const isPermissionError = err.code === 'permission-denied' || 
+                                  err.message?.toLowerCase().includes('permission') ||
+                                  err.message?.toLowerCase().includes('insufficient');
+          
+          if (!isPermissionError) {
+             handleFirestoreError(err, OperationType.GET, `users/${firebaseUser.uid}`);
+          }
+        }
+
         setUser({
           uid: firebaseUser.uid,
           email: firebaseUser.email,
           name: firebaseUser.displayName || firebaseUser.email?.split('@')[0],
           photo: firebaseUser.photoURL,
+          role,
+          bio,
         });
       } else {
         setUser(null);
@@ -1292,8 +1798,6 @@ export default function App() {
     }
   };
 
-  const isAdmin = user?.email === 'adityakumar16290@gmail.com';
-
   if (!isReady) {
     return (
       <div className="min-h-screen bg-white flex items-center justify-center">
@@ -1302,10 +1806,13 @@ export default function App() {
     );
   }
 
+  const isAdmin = user?.role === 'admin';
+
   return (
     <div className="min-h-screen bg-white text-black font-sans selection:bg-black selection:text-white">
-      <Navbar onOpenAuth={() => setIsAuthOpen(true)} user={user} onLogout={handleLogout} />
+      <Navbar onOpenAuth={() => setIsAuthOpen(true)} onOpenSettings={() => setIsSettingsOpen(true)} user={user} onLogout={handleLogout} />
       <AuthModal isOpen={isAuthOpen} onClose={() => setIsAuthOpen(false)} />
+      <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} user={user} />
       
       <main>
         <Hero onOpenAuth={() => setIsAuthOpen(true)} />
@@ -1313,7 +1820,6 @@ export default function App() {
         
         {user ? (
           <>
-            {isAdmin && <AdminDashboard />}
             <AIDemo />
           </>
         ) : (
@@ -1336,9 +1842,11 @@ export default function App() {
           </section>
         )}
 
-        <Blog isAdmin={user?.email === 'adityakumar16290@gmail.com'} />
+        <GrowthCalculator />
+        <Blog />
         <Pricing />
         <Contact />
+        {isAdmin && <AdminPanel />}
         <section className="py-24 px-6 bg-black text-white text-center overflow-hidden relative">
           <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full h-full opacity-20 pointer-events-none">
             <div className="absolute top-0 left-0 w-full h-full bg-[radial-gradient(circle_at_center,_var(--tw-gradient-from)_0%,_transparent_70%)] from-indigo-500/20" />

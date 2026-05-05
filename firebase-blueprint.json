@@ -9,6 +9,8 @@
         "email": { "type": "string", "format": "email" },
         "displayName": { "type": "string" },
         "photoURL": { "type": "string" },
+        "bio": { "type": "string" },
+        "theme": { "type": "string", "enum": ["light", "dark"] },
         "role": { "type": "string", "enum": ["user", "admin"] },
         "createdAt": { "type": "string", "format": "date-time" }
       },
@@ -21,12 +23,26 @@
       "properties": {
         "title": { "type": "string" },
         "excerpt": { "type": "string" },
+        "content": { "type": "string" },
         "tag": { "type": "string" },
         "date": { "type": "string" },
         "authorId": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["title", "excerpt", "tag", "date", "authorId"]
+    },
+    "Contact": {
+      "title": "Contact Submission",
+      "description": "Messages from users",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "message": { "type": "string" },
+        "status": { "type": "string", "enum": ["new", "read", "archived"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "email", "message"]
     }
   },
   "firestore": {
@@ -37,6 +53,10 @@
     "/blogPosts/{postId}": {
       "schema": "BlogPost",
       "description": "Public blog posts"
+    },
+    "/contacts/{contactId}": {
+      "schema": "Contact",
+      "description": "User inquiries"
     }
   }
 }
