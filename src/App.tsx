@@ -228,12 +228,15 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
       if (oobCode) {
         // Real reset if we have the code
         await confirmPasswordReset(auth, oobCode, newPassword);
-        setSuccess("Password updated successfully!");
-        setTimeout(() => setView('login'), 2000);
+        setSuccess("Password updated successfully! You can now sign in.");
+        setTimeout(() => {
+          setView('login');
+          setSuccess(null);
+        }, 2000);
       } else {
-        // Demo mode: simulate success
-        setSuccess("Demo: Password reset successfully simulated!");
-        setTimeout(() => setView('login'), 2500);
+        // We can't actually change the password in Firebase without the code or being logged in.
+        // But we can inform the user and suggest Google Login.
+        setError("Firebase requires a security code from your email to update your password. If you aren't receiving the email, please use 'Continue with Google'—we have already verified your admin access for your email.");
       }
     } catch (err: any) {
       setError(err.message);
@@ -356,6 +359,11 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
                 className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:border-black transition-colors text-base"
                 placeholder="name@company.com"
               />
+              {email === 'adityakumar16290@gmail.com' && !isSignUp && !isForgotPassword && (
+                <p className="mt-2 text-[10px] text-indigo-600 font-bold uppercase tracking-wider ml-1">
+                  Tip: Use "Continue with Google" for instant Admin access to your account.
+                </p>
+              )}
             </div>
           )}
           {!isForgotPassword && !isResetPassword && (
@@ -417,7 +425,7 @@ const AuthModal = ({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }
             disabled={isLoading}
             className="w-full bg-black text-white py-5 rounded-[1.25rem] font-bold hover:bg-gray-800 transition-all flex items-center justify-center gap-2 active:scale-[0.98] disabled:opacity-50"
           >
-            {isLoading ? <Activity size={20} className="animate-spin" /> : (isSignUp ? 'Create Account' : isForgotPassword ? 'Continue to Reset' : isResetPassword ? 'Set New Password' : 'Sign In')}
+            {isLoading ? <Activity size={20} className="animate-spin" /> : (isSignUp ? 'Create Account' : isForgotPassword ? 'Continue' : isResetPassword ? 'Set New Password' : 'Sign In')}
           </button>
         </form>
 
